@@ -31,66 +31,18 @@ jobs:
           source = Path('packages/core/src/permissions/rule-parser.ts')
           text = source.read_text()
 
-          shell_quote_import = "import { parse } from 'shell-quote';\n"
-          if shell_quote_import not in text:
-              raise SystemExit('shell-quote import anchor not found')
-          text = text.replace(shell_quote_import, '', 1)
-
           old_normalization = "  const normalizedCommand = stripLeadingVariableAssignments(command);\n"
           new_normalization = dedent('''\
-            // Concrete Bash permission rules represent the command identity the user
-            // explicitly trusted. Leading environment assignments can change runtime
-            // and loader startup semantics, so they must remain part of that identity
-            // instead of being stripped before permission matching (#10197).
-            const normalizedCommand = command.trim();
+            // Preserve legacy leading-assignment normalization for wildcard rules,
+            // whose scope is intentionally broad. Concrete rules must stay bound to
+            // the exact command identity the user approved (#10197).
+            const normalizedCommand = pattern.includes('*')
+              ? stripLeadingVariableAssignments(command)
+              : command.trim();
           ''')
           if old_normalization not in text:
               raise SystemExit('normalizedCommand anchor not found')
           text = text.replace(old_normalization, new_normalization, 1)
-
-          helper = dedent('''\
-            const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
-
-            function stripLeadingVariableAssignments(command: string): string {
-              const trimmed = command.trim();
-              if (!trimmed) {
-                return trimmed;
-              }
-
-              try {
-                const tokens: string[] = [];
-
-                for (const token of parse(trimmed)) {
-                  if (typeof token === 'string') {
-                    tokens.push(token);
-                  } else if (
-                    token &&
-                    typeof token === 'object' &&
-                    'op' in token &&
-                    typeof token.op === 'string'
-                  ) {
-                    tokens.push(token.op);
-                  }
-                }
-
-                let firstCommandToken = 0;
-                while (
-                  firstCommandToken < tokens.length &&
-                  ENV_ASSIGNMENT_REGEX.test(tokens[firstCommandToken]!)
-                ) {
-                  firstCommandToken++;
-                }
-
-                return tokens.slice(firstCommandToken).join(' ');
-              } catch {
-                return trimmed;
-              }
-            }
-
-          ''')
-          if helper not in text:
-              raise SystemExit('env-assignment helper block not found')
-          text = text.replace(helper, '', 1)
           source.write_text(text)
 
           test = Path('packages/core/src/permissions/static-env-assignment-permissions.test.ts')
@@ -119,9 +71,7 @@ jobs:
 
             describe('static environment assignment permissions (#10197)', () => {
               it('still matches the exact concrete command', () => {
-                expect(matchesCommandPattern('npm --version', 'npm --version')).toBe(
-                  true,
-                );
+                expect(matchesCommandPattern('npm --version', 'npm --version')).toBe(true);
               });
 
               it.each([
@@ -139,12 +89,17 @@ jobs:
               );
 
               it('allows an env-prefixed command when the rule explicitly includes it', () => {
-                const command =
-                  'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version';
+                const command = 'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version';
                 expect(matchesCommandPattern(command, command)).toBe(true);
               });
 
-              it('keeps a broad Bash wildcard broad', () => {
+              it('preserves legacy env-prefix matching for explicit wildcard rules', () => {
+                expect(
+                  matchesCommandPattern(
+                    'python3 *',
+                    'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
+                  ),
+                ).toBe(true);
                 expect(
                   matchesCommandPattern(
                     '*',
@@ -154,25 +109,20 @@ jobs:
               });
 
               it('does not let a concrete Bash allow auto-approve a runtime-sensitive env prefix', async () => {
-                const pm = new PermissionManager(
-                  makeConfig(['Bash(npm --version)']),
-                );
+                const pm = new PermissionManager(makeConfig(['Bash(npm --version)']));
                 pm.initialize();
 
                 await expect(
                   pm.evaluate({
                     toolName: 'run_shell_command',
-                    command:
-                      'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+                    command: 'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
                     cwd: '/repo',
                   }),
                 ).resolves.toBe('ask');
               });
 
               it('still allows the exact saved concrete Bash command', async () => {
-                const pm = new PermissionManager(
-                  makeConfig(['Bash(npm --version)']),
-                );
+                const pm = new PermissionManager(makeConfig(['Bash(npm --version)']));
                 pm.initialize();
 
                 await expect(
@@ -206,5 +156,5 @@ jobs:
           git config user.email "298325363+SLP-DEV1@users.noreply.github.com"
           git rm .github/workflows/apply-fix-10197.yml
           git add packages/core/src/permissions/rule-parser.ts packages/core/src/permissions/static-env-assignment-permissions.test.ts
-          git commit -m "fix(permissions): require explicit env prefixes in Bash rules"
+          git commit -m "fix(permissions): require explicit env prefixes in concrete Bash rules"
           git push origin HEAD
