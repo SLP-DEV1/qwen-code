@@ -21,242 +21,51 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Apply unresolved write redirect fix
+      - name: Apply fix and regression tests
         shell: bash
         run: |
           python3 <<'PY'
+          import base64
           from pathlib import Path
 
-          p = Path('packages/core/src/permissions/shell-semantics.ts')
-          s = p.read_text()
+          def d(value: str) -> str:
+              return base64.b64decode(value).decode()
 
-          s = s.replace(
-              "  pathMayDependOnCwd?: boolean;\n}",
-              "  pathMayDependOnCwd?: boolean;\n  /** True when a file path is known to be written but cannot be resolved statically. */\n  pathUnresolved?: boolean;\n}",
-              1,
-          )
-          s = s.replace(
-              "interface RedirectResult {\n  readFiles: string[];\n  writeFiles: string[];\n}",
-              "interface RedirectResult {\n  readFiles: string[];\n  writeFiles: string[];\n  unresolvedWrite: boolean;\n}",
-              1,
-          )
-          s = s.replace(
-              "  const writeFiles: string[] = [];\n  const toRemove = new Set<number>();",
-              "  const writeFiles: string[] = [];\n  let unresolvedWrite = false;\n  const toRemove = new Set<number>();",
-              1,
-          )
+          semantics = Path('packages/core/src/permissions/shell-semantics.ts')
+          text = semantics.read_text()
+          replacements = [
+              ('ICBwYXRoTWF5RGVwZW5kT25Dd2Q/OiBib29sZWFuOwp9', 'ICBwYXRoTWF5RGVwZW5kT25Dd2Q/OiBib29sZWFuOwogIC8qKiBUcnVlIHdoZW4gc2hlbGwgc3ludGF4IHByb3ZlcyBhIHdyaXRlIG9jY3VycyBidXQgaXRzIHBhdGggY2Fubm90IGJlIHJlc29sdmVkIHN0YXRpY2FsbHkuICovCiAgcGF0aFVucmVzb2x2ZWQ/OiBib29sZWFuOwp9'),
+              ('aW50ZXJmYWNlIFJlZGlyZWN0UmVzdWx0IHsKICByZWFkRmlsZXM6IHN0cmluZ1tdOwogIHdyaXRlRmlsZXM6IHN0cmluZ1tdOwp9', 'aW50ZXJmYWNlIFJlZGlyZWN0UmVzdWx0IHsKICByZWFkRmlsZXM6IHN0cmluZ1tdOwogIHdyaXRlRmlsZXM6IHN0cmluZ1tdOwogIHVucmVzb2x2ZWRXcml0ZTogYm9vbGVhbjsKfQ=='),
+              ('ICBjb25zdCB7IHJlYWRGaWxlczogcmVkaXJlY3RSZWFkcywgd3JpdGVGaWxlczogcmVkaXJlY3RXcml0ZXMgfSA9CiAgICBleHRyYWN0UmVkaXJlY3RzKHRva2VucywgY3dkKTs=', 'ICBjb25zdCB7CiAgICByZWFkRmlsZXM6IHJlZGlyZWN0UmVhZHMsCiAgICB3cml0ZUZpbGVzOiByZWRpcmVjdFdyaXRlcywKICAgIHVucmVzb2x2ZWRXcml0ZSwKICB9ID0gZXh0cmFjdFJlZGlyZWN0cyh0b2tlbnMsIGN3ZCk7'),
+              ('ICAgICAgLi4ucmVkaXJlY3RXcml0ZXMubWFwKChwKSA9PiAoewogICAgICAgIHZpcnR1YWxUb29sOiAnd3JpdGVfZmlsZScgYXMgY29uc3QsCiAgICAgICAgZmlsZVBhdGg6IHAsCiAgICAgIH0pKSwKICAgIF07', 'ICAgICAgLi4ucmVkaXJlY3RXcml0ZXMubWFwKChwKSA9PiAoewogICAgICAgIHZpcnR1YWxUb29sOiAnd3JpdGVfZmlsZScgYXMgY29uc3QsCiAgICAgICAgZmlsZVBhdGg6IHAsCiAgICAgIH0pKSwKICAgICAgLi4uKHVucmVzb2x2ZWRXcml0ZQogICAgICAgID8gW3sgdmlydHVhbFRvb2w6ICd3cml0ZV9maWxlJyBhcyBjb25zdCwgcGF0aFVucmVzb2x2ZWQ6IHRydWUgfV0KICAgICAgICA6IFtdKSwKICAgIF07'),
+              ('ICAgIC4uLnJlZGlyZWN0V3JpdGVzLm1hcCgocCkgPT4gKHsKICAgICAgdmlydHVhbFRvb2w6ICd3cml0ZV9maWxlJyBhcyBjb25zdCwKICAgICAgZmlsZVBhdGg6IHAsCiAgICB9KSksCiAgKTs=', 'ICAgIC4uLnJlZGlyZWN0V3JpdGVzLm1hcCgocCkgPT4gKHsKICAgICAgdmlydHVhbFRvb2w6ICd3cml0ZV9maWxlJyBhcyBjb25zdCwKICAgICAgZmlsZVBhdGg6IHAsCiAgICB9KSksCiAgICAuLi4odW5yZXNvbHZlZFdyaXRlCiAgICAgID8gW3sgdmlydHVhbFRvb2w6ICd3cml0ZV9maWxlJyBhcyBjb25zdCwgcGF0aFVucmVzb2x2ZWQ6IHRydWUgfV0KICAgICAgOiBbXSksCiAgKTs='),
+          ]
+          for old64, new64 in replacements:
+              old = d(old64)
+              if old not in text:
+                  raise SystemExit('required shell-semantics anchor not found')
+              text = text.replace(old, d(new64), 1)
 
-          # For separate-token write redirects, consume the redirect even when the
-          # destination is dynamic and preserve a conservative unresolved-write signal.
-          for op_group in [
-              "tok === '>' || tok === '1>'",
-              "tok === '>>' || tok === '1>>'",
-          ]:
-              marker = f"if ({op_group}) {{\n      const target = tokens[i + 1];\n      if (target && looksLikePath(target)) {{"
-              replacement = f"if ({op_group}) {{\n      const target = tokens[i + 1];\n      if (target) {{\n        if (!looksLikePath(target)) unresolvedWrite = true;\n        if (looksLikePath(target)) {{"
-              if marker not in s:
-                  raise SystemExit(f'missing write redirect marker: {op_group}')
-              s = s.replace(marker, replacement, 1)
-              # Close the new inner path check immediately after the network-device block.
-              needle = "          writeFiles.push(resolvePath(target, cwd));\n        }\n        toRemove.add(i);"
-              repl = "          writeFiles.push(resolvePath(target, cwd));\n        }\n        }\n        toRemove.add(i);"
-              if needle not in s:
-                  raise SystemExit(f'missing write redirect close marker: {op_group}')
-              s = s.replace(needle, repl, 1)
+          start = text.find('function extractRedirects(tokens: string[], cwd: string): RedirectResult {')
+          end_marker = '\n// ─────────────────────────────────────────────────────────────────────────────\n// Argument parsing'
+          end = text.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit('extractRedirects boundaries not found')
+          new_redirects = d('ZnVuY3Rpb24gaXNGZER1cGxpY2F0aW9uVGFyZ2V0KHRhcmdldDogc3RyaW5nKTogYm9vbGVhbiB7CiAgcmV0dXJuIC9eJig/OlxkK3wtKSQvLnRlc3QodGFyZ2V0KTsKfQoKZnVuY3Rpb24gaXNIZXJlZG9jUmVkaXJlY3RPcGVyYXRvcihvcDogc3RyaW5nKTogYm9vbGVhbiB7CiAgcmV0dXJuIC9eKD86XGQrKT88PC0/JC8udGVzdChvcCk7Cn0KCmZ1bmN0aW9uIGlzV3JpdGVSZWRpcmVjdE9wZXJhdG9yKG9wOiBzdHJpbmcpOiBib29sZWFuIHsKICByZXR1cm4gL14oPzpcZCspPyg/Oj4+P3w8PikkLy50ZXN0KG9wKSB8fCBvcCA9PT0gJyY+JyB8fCBvcCA9PT0gJyY+Pic7Cn0KCmZ1bmN0aW9uIGlzUmVhZFJlZGlyZWN0T3BlcmF0b3Iob3A6IHN0cmluZyk6IGJvb2xlYW4gewogIHJldHVybiAvXig/OlxkKyk/PCQvLnRlc3Qob3ApOwp9CgpmdW5jdGlvbiBleHRyYWN0UmVkaXJlY3RzKHRva2Vuczogc3RyaW5nW10sIGN3ZDogc3RyaW5nKTogUmVkaXJlY3RSZXN1bHQgewogIGNvbnN0IHJlYWRGaWxlczogc3RyaW5nW10gPSBbXTsKICBjb25zdCB3cml0ZUZpbGVzOiBzdHJpbmdbXSA9IFtdOwogIGNvbnN0IHRvUmVtb3ZlID0gbmV3IFNldDxudW1iZXI+KCk7CiAgbGV0IHVucmVzb2x2ZWRXcml0ZSA9IGZhbHNlOwoKICBjb25zdCByZWNvcmRXcml0ZVRhcmdldCA9ICh0YXJnZXQ6IHN0cmluZyk6IHZvaWQgPT4gewogICAgaWYgKAogICAgICB0YXJnZXQgPT09ICcvZGV2L251bGwnIHx8CiAgICAgIGlzRmREdXBsaWNhdGlvblRhcmdldCh0YXJnZXQpIHx8CiAgICAgIGlzTmV0d29ya1BzZXVkb0RldmljZSh0YXJnZXQpCiAgICApIHsKICAgICAgcmV0dXJuOwogICAgfQogICAgaWYgKGxvb2tzTGlrZVBhdGgodGFyZ2V0KSkgewogICAgICB3cml0ZUZpbGVzLnB1c2gocmVzb2x2ZVBhdGgodGFyZ2V0LCBjd2QpKTsKICAgIH0gZWxzZSB7CiAgICAgIHVucmVzb2x2ZWRXcml0ZSA9IHRydWU7CiAgICB9CiAgfTsKCiAgY29uc3QgcmVjb3JkUmVhZFRhcmdldCA9ICh0YXJnZXQ6IHN0cmluZyk6IHZvaWQgPT4gewogICAgaWYgKGlzRmREdXBsaWNhdGlvblRhcmdldCh0YXJnZXQpIHx8IGlzTmV0d29ya1BzZXVkb0RldmljZSh0YXJnZXQpKSB7CiAgICAgIHJldHVybjsKICAgIH0KICAgIGlmIChsb29rc0xpa2VQYXRoKHRhcmdldCkpIHsKICAgICAgcmVhZEZpbGVzLnB1c2gocmVzb2x2ZVBhdGgodGFyZ2V0LCBjd2QpKTsKICAgIH0KICB9OwoKICBmb3IgKGxldCBpID0gMDsgaSA8IHRva2Vucy5sZW5ndGg7IGkrKykgewogICAgY29uc3QgdG9rID0gdG9rZW5zW2ldITsKCiAgICBpZiAoaXNIZXJlZG9jUmVkaXJlY3RPcGVyYXRvcih0b2spKSB7CiAgICAgIHRvUmVtb3ZlLmFkZChpKTsKICAgICAgaWYgKHRva2Vuc1tpICsgMV0pIHsKICAgICAgICB0b1JlbW92ZS5hZGQoaSArIDEpOwogICAgICAgIGkrKzsKICAgICAgfQogICAgICBjb250aW51ZTsKICAgIH0KCiAgICBpZiAoaXNXcml0ZVJlZGlyZWN0T3BlcmF0b3IodG9rKSkgewogICAgICBjb25zdCB0YXJnZXQgPSB0b2tlbnNbaSArIDFdOwogICAgICB0b1JlbW92ZS5hZGQoaSk7CiAgICAgIGlmICh0YXJnZXQpIHsKICAgICAgICByZWNvcmRXcml0ZVRhcmdldCh0YXJnZXQpOwogICAgICAgIHRvUmVtb3ZlLmFkZChpICsgMSk7CiAgICAgICAgaSsrOwogICAgICB9IGVsc2UgewogICAgICAgIHVucmVzb2x2ZWRXcml0ZSA9IHRydWU7CiAgICAgIH0KICAgICAgY29udGludWU7CiAgICB9CgogICAgaWYgKGlzUmVhZFJlZGlyZWN0T3BlcmF0b3IodG9rKSkgewogICAgICBjb25zdCB0YXJnZXQgPSB0b2tlbnNbaSArIDFdOwogICAgICB0b1JlbW92ZS5hZGQoaSk7CiAgICAgIGlmICh0YXJnZXQpIHsKICAgICAgICByZWNvcmRSZWFkVGFyZ2V0KHRhcmdldCk7CiAgICAgICAgdG9SZW1vdmUuYWRkKGkgKyAxKTsKICAgICAgICBpKys7CiAgICAgIH0KICAgICAgY29udGludWU7CiAgICB9CgogICAgY29uc3QgbWF0Y2ggPSB0b2subWF0Y2goCiAgICAgIC9eKCg/OlxkKyk/PDwtP3woPzpcZCspPzw+fCg/OlxkKyk/Pj58KD86XGQrKT8+fCg/OlxkKyk/PHwmPj58Jj4pKC4rKSQvLAogICAgKTsKICAgIGlmICghbWF0Y2gpIGNvbnRpbnVlOwoKICAgIGNvbnN0IG9wID0gbWF0Y2hbMV0hOwogICAgY29uc3QgdGFyZ2V0ID0gbWF0Y2hbMl0hOwogICAgaWYgKGlzSGVyZWRvY1JlZGlyZWN0T3BlcmF0b3Iob3ApKSB7CiAgICAgIHRvUmVtb3ZlLmFkZChpKTsKICAgICAgY29udGludWU7CiAgICB9CiAgICBpZiAoaXNXcml0ZVJlZGlyZWN0T3BlcmF0b3Iob3ApKSB7CiAgICAgIHJlY29yZFdyaXRlVGFyZ2V0KHRhcmdldCk7CiAgICB9IGVsc2UgaWYgKGlzUmVhZFJlZGlyZWN0T3BlcmF0b3Iob3ApKSB7CiAgICAgIHJlY29yZFJlYWRUYXJnZXQodGFyZ2V0KTsKICAgIH0KICAgIHRvUmVtb3ZlLmFkZChpKTsKICB9CgogIGNvbnN0IGZpbHRlcmVkID0gdG9rZW5zLmZpbHRlcigoXywgaWR4KSA9PiAhdG9SZW1vdmUuaGFzKGlkeCkpOwogIHRva2Vucy5sZW5ndGggPSAwOwogIHRva2Vucy5wdXNoKC4uLmZpbHRlcmVkKTsKCiAgcmV0dXJuIHsgcmVhZEZpbGVzLCB3cml0ZUZpbGVzLCB1bnJlc29sdmVkV3JpdGUgfTsKfQo=')
+          text = text[:start] + new_redirects + text[end:]
+          semantics.write_text(text)
 
-          stderr_old = """      if (target) {
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          writeFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);"""
-          stderr_new = """      if (target) {
-        if (
-          target !== '/dev/null' &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          if (looksLikePath(target)) {
-            writeFiles.push(resolvePath(target, cwd));
-          } else if (!/^&(?:\\d+|-)$/.test(target)) {
-            unresolvedWrite = true;
-          }
-        }
-        toRemove.add(i);"""
-          if stderr_old not in s:
-              raise SystemExit('missing stderr redirect block')
-          s = s.replace(stderr_old, stderr_new, 1)
-
-          combined_old = """        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          if (op === '<') {
-            readFiles.push(resolvePath(target, cwd));
-          } else {
-            writeFiles.push(resolvePath(target, cwd));
-          }
-        }
-        toRemove.add(i);"""
-          combined_new = """        if (
-          target !== '/dev/null' &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          if (looksLikePath(target)) {
-            if (op === '<') {
-              readFiles.push(resolvePath(target, cwd));
-            } else {
-              writeFiles.push(resolvePath(target, cwd));
-            }
-          } else if (op !== '<' && !/^&(?:\\d+|-)$/.test(target)) {
-            unresolvedWrite = true;
-          }
-        }
-        toRemove.add(i);"""
-          if combined_old not in s:
-              raise SystemExit('missing combined redirect block')
-          s = s.replace(combined_old, combined_new, 1)
-
-          s = s.replace(
-              "  return { readFiles, writeFiles };",
-              "  return { readFiles, writeFiles, unresolvedWrite };",
-              1,
-          )
-          old_destructure = "  const { readFiles: redirectReads, writeFiles: redirectWrites } =\n    extractRedirects(tokens, cwd);"
-          new_destructure = "  const {\n    readFiles: redirectReads,\n    writeFiles: redirectWrites,\n    unresolvedWrite,\n  } = extractRedirects(tokens, cwd);"
-          if old_destructure not in s:
-              raise SystemExit('missing redirect destructure')
-          s = s.replace(old_destructure, new_destructure, 1)
-
-          no_cmd_old = """      ...redirectWrites.map((p) => ({
-        virtualTool: 'write_file' as const,
-        filePath: p,
-      })),
-    ];"""
-          no_cmd_new = """      ...redirectWrites.map((p) => ({
-        virtualTool: 'write_file' as const,
-        filePath: p,
-      })),
-      ...(unresolvedWrite
-        ? [{ virtualTool: 'write_file' as const, pathUnresolved: true }]
-        : []),
-    ];"""
-          if no_cmd_old not in s:
-              raise SystemExit('missing no-command redirect mapping')
-          s = s.replace(no_cmd_old, no_cmd_new, 1)
-
-          final_old = """    ...redirectWrites.map((p) => ({
-      virtualTool: 'write_file' as const,
-      filePath: p,
-    })),
-  );"""
-          final_new = """    ...redirectWrites.map((p) => ({
-      virtualTool: 'write_file' as const,
-      filePath: p,
-    })),
-    ...(unresolvedWrite
-      ? [{ virtualTool: 'write_file' as const, pathUnresolved: true }]
-      : []),
-  );"""
-          if final_old not in s:
-              raise SystemExit('missing final redirect mapping')
-          s = s.replace(final_old, final_new, 1)
-          p.write_text(s)
-
-          p = Path('packages/core/src/permissions/permission-manager.ts')
-          s = p.read_text()
-          old = "        op.cwdUnknown &&\n        op.pathMayDependOnCwd &&\n"
-          count = s.count(old)
+          manager = Path('packages/core/src/permissions/permission-manager.ts')
+          manager_text = manager.read_text()
+          old = d('ICAgICAgICBvcC5jd2RVbmtub3duICYmCiAgICAgICAgb3AucGF0aE1heURlcGVuZE9uQ3dkICYmCg==')
+          count = manager_text.count(old)
           if count != 3:
               raise SystemExit(f'expected 3 uncertain-path checks, found {count}')
-          s = s.replace(
-              old,
-              "        (op.pathUnresolved ||\n          (op.cwdUnknown && op.pathMayDependOnCwd)) &&\n",
-          )
-          p.write_text(s)
+          manager_text = manager_text.replace(old, d('ICAgICAgICAob3AucGF0aFVucmVzb2x2ZWQgfHwKICAgICAgICAgIChvcC5jd2RVbmtub3duICYmIG9wLnBhdGhNYXlEZXBlbmRPbkN3ZCkpICYmCg=='))
+          manager.write_text(manager_text)
+
+          Path('packages/core/src/permissions/dynamic-redirect-permissions.test.ts').write_text(d('LyoqCiAqIEBsaWNlbnNlCiAqIENvcHlyaWdodCAyMDI2IFF3ZW4KICogU1BEWC1MaWNlbnNlLUlkZW50aWZpZXI6IEFwYWNoZS0yLjAKICovCgppbXBvcnQgeyBkZXNjcmliZSwgZXhwZWN0LCBpdCB9IGZyb20gJ3ZpdGVzdCc7CmltcG9ydCB7IFBlcm1pc3Npb25NYW5hZ2VyIH0gZnJvbSAnLi9wZXJtaXNzaW9uLW1hbmFnZXIuanMnOwppbXBvcnQgdHlwZSB7IFBlcm1pc3Npb25NYW5hZ2VyQ29uZmlnIH0gZnJvbSAnLi9wZXJtaXNzaW9uLW1hbmFnZXIuanMnOwppbXBvcnQgeyBleHRyYWN0U2hlbGxPcGVyYXRpb25zIH0gZnJvbSAnLi9zaGVsbC1zZW1hbnRpY3MuanMnOwoKZnVuY3Rpb24gbWFrZUNvbmZpZyhvcHRpb25zOiB7CiAgYWxsb3c/OiBzdHJpbmdbXTsKICBhc2s/OiBzdHJpbmdbXTsKICBkZW55Pzogc3RyaW5nW107Cn0pOiBQZXJtaXNzaW9uTWFuYWdlckNvbmZpZyB7CiAgcmV0dXJuIHsKICAgIGdldFBlcm1pc3Npb25zQWxsb3c6ICgpID0+IG9wdGlvbnMuYWxsb3cgPz8gW10sCiAgICBnZXRQZXJtaXNzaW9uc0FzazogKCkgPT4gb3B0aW9ucy5hc2sgPz8gW10sCiAgICBnZXRQZXJtaXNzaW9uc0Rlbnk6ICgpID0+IG9wdGlvbnMuZGVueSA/PyBbXSwKICAgIGdldFByb2plY3RSb290OiAoKSA9PiAnL3JlcG8nLAogICAgZ2V0Q3dkOiAoKSA9PiAnL3JlcG8nLAogICAgZ2V0QXBwcm92YWxNb2RlOiAoKSA9PiAnZGVmYXVsdCcsCiAgfTsKfQoKZGVzY3JpYmUoJ3VucmVzb2x2ZWQgc2hlbGwgd3JpdGUgcmVkaXJlY3RzICgjMTAxOTYpJywgKCkgPT4gewogIGl0LmVhY2goWwogICAgJ3ByaW50ZiBQQVlMT0FEID4iJFBXRC9wcm90ZWN0ZWQudHh0IicsCiAgICAncHJpbnRmIFBBWUxPQUQgPiIke1BXRH0vcHJvdGVjdGVkLnR4dCInLAogICAgJ3ByaW50ZiBQQVlMT0FEID4iJERJUi9wcm90ZWN0ZWQudHh0IicsCiAgXSkoJ3ByZXNlcnZlcyBhbiB1bnJlc29sdmVkIHdyaXRlIG9wZXJhdGlvbiBmb3IgJXMnLCAoY29tbWFuZCkgPT4gewogICAgZXhwZWN0KGV4dHJhY3RTaGVsbE9wZXJhdGlvbnMoY29tbWFuZCwgJy9yZXBvJykpLnRvQ29udGFpbkVxdWFsKHsKICAgICAgdmlydHVhbFRvb2w6ICd3cml0ZV9maWxlJywKICAgICAgcGF0aFVucmVzb2x2ZWQ6IHRydWUsCiAgICB9KTsKICB9KTsKCiAgaXQoJ3ByZXNlcnZlcyBhIGNvbmNyZXRlIHdyaXRlIGJlaGluZCBhIG51bWVyaWMgZmQnLCAoKSA9PiB7CiAgICBleHBlY3QoCiAgICAgIGV4dHJhY3RTaGVsbE9wZXJhdGlvbnMoJ3ByaW50ZiBQQVlMT0FEIDM+cHJvdGVjdGVkLnR4dCA+JjMnLCAnL3JlcG8nKSwKICAgICkudG9Db250YWluRXF1YWwoewogICAgICB2aXJ0dWFsVG9vbDogJ3dyaXRlX2ZpbGUnLAogICAgICBmaWxlUGF0aDogJy9yZXBvL3Byb3RlY3RlZC50eHQnLAogICAgfSk7CiAgfSk7CgogIGl0KCdkb2VzIG5vdCB0cmVhdCBmZCBkdXBsaWNhdGlvbiBhcyBhbiB1bnJlc29sdmVkIGZpbGVzeXN0ZW0gd3JpdGUnLCAoKSA9PiB7CiAgICBleHBlY3QoCiAgICAgIGV4dHJhY3RTaGVsbE9wZXJhdGlvbnMoJ3ByaW50ZiBQQVlMT0FEID4mMycsICcvcmVwbycpLAogICAgKS5ub3QudG9Db250YWluRXF1YWwoewogICAgICB2aXJ0dWFsVG9vbDogJ3dyaXRlX2ZpbGUnLAogICAgICBwYXRoVW5yZXNvbHZlZDogdHJ1ZSwKICAgIH0pOwogIH0pOwoKICBpdCgnZG9lcyBub3QgbGV0IGEgQmFzaCBhbGxvdyBieXBhc3MgYSBXcml0ZSBkZW55IHRocm91Z2ggYSBkeW5hbWljIHJlZGlyZWN0JywgYXN5bmMgKCkgPT4gewogICAgY29uc3QgcG0gPSBuZXcgUGVybWlzc2lvbk1hbmFnZXIoCiAgICAgIG1ha2VDb25maWcoewogICAgICAgIGFsbG93OiBbJ0Jhc2gocHJpbnRmIFBBWUxPQUQpJ10sCiAgICAgICAgZGVueTogWydXcml0ZUZpbGVUb29sKHByb3RlY3RlZC50eHQpJ10sCiAgICAgIH0pLAogICAgKTsKICAgIHBtLmluaXRpYWxpemUoKTsKCiAgICBhd2FpdCBleHBlY3QoCiAgICAgIHBtLmV2YWx1YXRlKHsKICAgICAgICB0b29sTmFtZTogJ3J1bl9zaGVsbF9jb21tYW5kJywKICAgICAgICBjb21tYW5kOiAncHJpbnRmIFBBWUxPQUQgPiIkUFdEL3Byb3RlY3RlZC50eHQiJywKICAgICAgICBjd2Q6ICcvcmVwbycsCiAgICAgIH0pLAogICAgKS5yZXNvbHZlcy50b0JlKCdhc2snKTsKICB9KTsKCiAgaXQoJ3N0aWxsIGRlbmllcyB0aGUgZXF1aXZhbGVudCBjb25jcmV0ZSByZWRpcmVjdCcsIGFzeW5jICgpID0+IHsKICAgIGNvbnN0IHBtID0gbmV3IFBlcm1pc3Npb25NYW5hZ2VyKAogICAgICBtYWtlQ29uZmlnKHsKICAgICAgICBhbGxvdzogWydCYXNoKHByaW50ZiBQQVlMT0FEKSddLAogICAgICAgIGRlbnk6IFsnV3JpdGVGaWxlVG9vbChwcm90ZWN0ZWQudHh0KSddLAogICAgICB9KSwKICAgICk7CiAgICBwbS5pbml0aWFsaXplKCk7CgogICAgYXdhaXQgZXhwZWN0KAogICAgICBwbS5ldmFsdWF0ZSh7CiAgICAgICAgdG9vbE5hbWU6ICdydW5fc2hlbGxfY29tbWFuZCcsCiAgICAgICAgY29tbWFuZDogJ3ByaW50ZiBQQVlMT0FEID5wcm90ZWN0ZWQudHh0JywKICAgICAgICBjd2Q6ICcvcmVwbycsCiAgICAgIH0pLAogICAgKS5yZXNvbHZlcy50b0JlKCdkZW55Jyk7CiAgfSk7CgogIGl0KCdrZWVwcyBhbiBvcmRpbmFyeSBCYXNoIGFsbG93IHVuY2hhbmdlZCB3aXRob3V0IGEgcmVkaXJlY3QnLCBhc3luYyAoKSA9PiB7CiAgICBjb25zdCBwbSA9IG5ldyBQZXJtaXNzaW9uTWFuYWdlcigKICAgICAgbWFrZUNvbmZpZyh7CiAgICAgICAgYWxsb3c6IFsnQmFzaChwcmludGYgUEFZTE9BRCknXSwKICAgICAgICBkZW55OiBbJ1dyaXRlRmlsZVRvb2wocHJvdGVjdGVkLnR4dCknXSwKICAgICAgfSksCiAgICApOwogICAgcG0uaW5pdGlhbGl6ZSgpOwoKICAgIGF3YWl0IGV4cGVjdCgKICAgICAgcG0uZXZhbHVhdGUoewogICAgICAgIHRvb2xOYW1lOiAncnVuX3NoZWxsX2NvbW1hbmQnLAogICAgICAgIGNvbW1hbmQ6ICdwcmludGYgUEFZTE9BRCcsCiAgICAgICAgY3dkOiAnL3JlcG8nLAogICAgICB9KSwKICAgICkucmVzb2x2ZXMudG9CZSgnYWxsb3cnKTsKICB9KTsKfSk7Cg=='))
           PY
-
-      - name: Add regression tests
-        shell: bash
-        run: |
-          cat > packages/core/src/permissions/dynamic-redirect-permissions.test.ts <<'EOF'
-          /**
-           * @license
-           * Copyright 2026 Qwen
-           * SPDX-License-Identifier: Apache-2.0
-           */
-
-          import { describe, expect, it } from 'vitest';
-          import { PermissionManager } from './permission-manager.js';
-          import type { PermissionManagerConfig } from './permission-manager.js';
-          import { extractShellOperations } from './shell-semantics.js';
-
-          function makeConfig(options: { allow?: string[]; ask?: string[]; deny?: string[] }): PermissionManagerConfig {
-            return {
-              getPermissionsAllow: () => options.allow ?? [],
-              getPermissionsAsk: () => options.ask ?? [],
-              getPermissionsDeny: () => options.deny ?? [],
-              getProjectRoot: () => '/repo',
-              getCwd: () => '/repo',
-              getApprovalMode: () => 'default',
-            };
-          }
-
-          describe('unresolved shell write redirects (#10196)', () => {
-            it.each([
-              'printf PAYLOAD >"$PWD/protected.txt"',
-              'printf PAYLOAD >"${PWD}/protected.txt"',
-              'printf PAYLOAD >"$DIR/protected.txt"',
-            ])('preserves an unresolved write operation for %s', (command) => {
-              expect(extractShellOperations(command, '/repo')).toContainEqual({
-                virtualTool: 'write_file',
-                pathUnresolved: true,
-              });
-            });
-
-            it('does not let a Bash allow bypass a Write deny through a dynamic redirect', async () => {
-              const pm = new PermissionManager(makeConfig({
-                allow: ['Bash(printf PAYLOAD)'],
-                deny: ['WriteFileTool(protected.txt)'],
-              }));
-              pm.initialize();
-              await expect(pm.evaluate({
-                toolName: 'run_shell_command',
-                command: 'printf PAYLOAD >"$PWD/protected.txt"',
-                cwd: '/repo',
-              })).resolves.toBe('ask');
-            });
-
-            it('still denies the equivalent concrete redirect', async () => {
-              const pm = new PermissionManager(makeConfig({
-                allow: ['Bash(printf PAYLOAD)'],
-                deny: ['WriteFileTool(protected.txt)'],
-              }));
-              pm.initialize();
-              await expect(pm.evaluate({
-                toolName: 'run_shell_command',
-                command: 'printf PAYLOAD >protected.txt',
-                cwd: '/repo',
-              })).resolves.toBe('deny');
-            });
-
-            it('keeps an ordinary Bash allow unchanged without a redirect', async () => {
-              const pm = new PermissionManager(makeConfig({
-                allow: ['Bash(printf PAYLOAD)'],
-                deny: ['WriteFileTool(protected.txt)'],
-              }));
-              pm.initialize();
-              await expect(pm.evaluate({
-                toolName: 'run_shell_command',
-                command: 'printf PAYLOAD',
-                cwd: '/repo',
-              })).resolves.toBe('allow');
-            });
-          });
-          EOF
 
       - name: Install dependencies
         run: npm ci
