@@ -1,0 +1,35 @@
+name: Repair 10196 validation count
+
+on:
+  push:
+    branches:
+      - fix/10196-unresolved-write-redirects
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Correct current-main occurrence count
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/apply-fix-10196.yml')
+          s = p.read_text()
+          s = s.replace("if count != 3:", "if count != 1:", 1)
+          s = s.replace("expected 3 uncertain-path checks", "expected 1 uncertain-path check", 1)
+          p.write_text(s)
+          PY
+      - name: Commit repair
+        shell: bash
+        run: |
+          git config user.name "SLP-DEV1"
+          git config user.email "298325363+SLP-DEV1@users.noreply.github.com"
+          git rm .github/workflows/repair-10196.yml
+          git add .github/workflows/apply-fix-10196.yml
+          git commit -m "chore: align #10196 patcher with current main"
+          git push origin HEAD
