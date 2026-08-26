@@ -32,34 +32,30 @@ jobs:
           text = semantics.read_text()
 
           interface_anchor = "  pathMayDependOnCwd?: boolean;\n}\n"
-          interface_replacement = dedent('''\
-              pathMayDependOnCwd?: boolean;
-              /**
-               * True when the shell syntax proves that a file operation occurs but
-               * the effective path cannot be resolved statically (for example a
-               * redirect to `$DIR/file`). Permission evaluation must fail closed
-               * when restrictive rules exist for this virtual tool.
-               */
-              pathUnresolved?: boolean;
-            }
-          ''')
+          interface_replacement = """  pathMayDependOnCwd?: boolean;
+  /**
+   * True when shell syntax proves that a file operation occurs but the
+   * effective path cannot be resolved statically (for example `$DIR/file`).
+   * Permission evaluation must fail closed when restrictive rules exist.
+   */
+  pathUnresolved?: boolean;
+}
+"""
           if interface_anchor not in text:
               raise SystemExit('ShellOperation interface anchor not found')
           text = text.replace(interface_anchor, interface_replacement, 1)
 
-          result_anchor = dedent('''\
-            interface RedirectResult {
-              readFiles: string[];
-              writeFiles: string[];
-            }
-          ''')
-          result_replacement = dedent('''\
-            interface RedirectResult {
-              readFiles: string[];
-              writeFiles: string[];
-              unresolvedWrite: boolean;
-            }
-          ''')
+          result_anchor = """interface RedirectResult {
+  readFiles: string[];
+  writeFiles: string[];
+}
+"""
+          result_replacement = """interface RedirectResult {
+  readFiles: string[];
+  writeFiles: string[];
+  unresolvedWrite: boolean;
+}
+"""
           if result_anchor not in text:
               raise SystemExit('RedirectResult anchor not found')
           text = text.replace(result_anchor, result_replacement, 1)
@@ -183,56 +179,59 @@ jobs:
           ''')
           text = text[:start] + new_redirects + text[end:]
 
-          destructure_anchor = dedent('''\
-              const { readFiles: redirectReads, writeFiles: redirectWrites } =
-                extractRedirects(tokens, cwd);
-          ''')
-          destructure_replacement = dedent('''\
-              const {
-                readFiles: redirectReads,
-                writeFiles: redirectWrites,
-                unresolvedWrite,
-              } = extractRedirects(tokens, cwd);
-              const unresolvedRedirectWrites: ShellOperation[] = unresolvedWrite
-                ? [{ virtualTool: 'write_file', pathUnresolved: true }]
-                : [];
-          ''')
+          destructure_anchor = "  const { readFiles: redirectReads, writeFiles: redirectWrites } =\n    extractRedirects(tokens, cwd);"
+          destructure_replacement = """  const {
+    readFiles: redirectReads,
+    writeFiles: redirectWrites,
+    unresolvedWrite,
+  } = extractRedirects(tokens, cwd);
+  const redirectOps: ShellOperation[] = [
+    ...redirectReads.map((p) => ({
+      virtualTool: 'read_file' as const,
+      filePath: p,
+    })),
+    ...redirectWrites.map((p) => ({
+      virtualTool: 'write_file' as const,
+      filePath: p,
+    })),
+    ...(unresolvedWrite
+      ? [{ virtualTool: 'write_file' as const, pathUnresolved: true }]
+      : []),
+  ];"""
           if destructure_anchor not in text:
               raise SystemExit('extractRedirects destructuring anchor not found')
           text = text.replace(destructure_anchor, destructure_replacement, 1)
 
-          write_mapping = dedent('''\
-                  ...redirectWrites.map((p) => ({
-                    virtualTool: 'write_file' as const,
-                    filePath: p,
-                  })),
-          ''')
-          write_mapping_replacement = write_mapping + "      ...unresolvedRedirectWrites,\n"
-          mapping_count = text.count(write_mapping)
-          if mapping_count != 2:
-              raise SystemExit(f'expected 2 redirect write mappings, found {mapping_count}')
-          text = text.replace(write_mapping, write_mapping_replacement)
+          no_cmd_start = text.find("  if (!cmdName) {", text.find("  const cmdName = tokens[0];"))
+          no_cmd_end = text.find("\n\n  const ops: ShellOperation[] = [];", no_cmd_start)
+          if no_cmd_start < 0 or no_cmd_end < 0:
+              raise SystemExit('no-command redirect block not found')
+          text = text[:no_cmd_start] + "  if (!cmdName) {\n    return redirectOps;\n  }" + text[no_cmd_end:]
+
+          append_start = text.find("  // Append redirect-derived operations")
+          append_end = text.find("\n\n  return ops;", append_start)
+          if append_start < 0 or append_end < 0:
+              raise SystemExit('redirect append block not found')
+          text = text[:append_start] + "  // Append redirect-derived operations, including unresolved writes.\n  ops.push(...redirectOps);" + text[append_end:]
           semantics.write_text(text)
 
           manager = Path('packages/core/src/permissions/permission-manager.ts')
           manager_text = manager.read_text()
 
-          priority_anchor = dedent('''\
-            const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
-              deny: 3,
-              ask: 2,
-              default: 1,
-              allow: 0,
-            };
-          ''')
-          priority_replacement = priority_anchor + dedent('''\
-
-            function shellOperationPathIsUncertain(op: ShellOperation): boolean {
-              return Boolean(
-                op.pathUnresolved || (op.cwdUnknown && op.pathMayDependOnCwd),
-              );
-            }
-          ''')
+          priority_anchor = """const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
+  deny: 3,
+  ask: 2,
+  default: 1,
+  allow: 0,
+};
+"""
+          priority_replacement = priority_anchor + """
+function shellOperationPathIsUncertain(op: ShellOperation): boolean {
+  return Boolean(
+    op.pathUnresolved || (op.cwdUnknown && op.pathMayDependOnCwd),
+  );
+}
+"""
           if priority_anchor not in manager_text:
               raise SystemExit('decision priority anchor not found')
           manager_text = manager_text.replace(priority_anchor, priority_replacement, 1)
