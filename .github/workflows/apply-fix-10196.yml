@@ -1,0 +1,393 @@
+name: Apply fix for issue 10196
+
+on:
+  push:
+    branches:
+      - fix/10196-unresolved-write-redirects
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Apply unresolved write redirect fix and regressions
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          from textwrap import dedent
+
+          semantics = Path('packages/core/src/permissions/shell-semantics.ts')
+          text = semantics.read_text()
+
+          interface_anchor = "  pathMayDependOnCwd?: boolean;\n}\n"
+          interface_replacement = dedent('''\
+              pathMayDependOnCwd?: boolean;
+              /**
+               * True when the shell syntax proves that a file operation occurs but
+               * the effective path cannot be resolved statically (for example a
+               * redirect to `$DIR/file`). Permission evaluation must fail closed
+               * when restrictive rules exist for this virtual tool.
+               */
+              pathUnresolved?: boolean;
+            }
+          ''')
+          if interface_anchor not in text:
+              raise SystemExit('ShellOperation interface anchor not found')
+          text = text.replace(interface_anchor, interface_replacement, 1)
+
+          result_anchor = dedent('''\
+            interface RedirectResult {
+              readFiles: string[];
+              writeFiles: string[];
+            }
+          ''')
+          result_replacement = dedent('''\
+            interface RedirectResult {
+              readFiles: string[];
+              writeFiles: string[];
+              unresolvedWrite: boolean;
+            }
+          ''')
+          if result_anchor not in text:
+              raise SystemExit('RedirectResult anchor not found')
+          text = text.replace(result_anchor, result_replacement, 1)
+
+          start_marker = "function extractRedirects(tokens: string[], cwd: string): RedirectResult {"
+          end_marker = "\n// ─────────────────────────────────────────────────────────────────────────────\n// Argument parsing"
+          start = text.find(start_marker)
+          end = text.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit('extractRedirects function boundaries not found')
+
+          new_redirects = dedent(r'''\
+            function isFdDuplicationTarget(target: string): boolean {
+              return /^&(?:\d+|-)$/.test(target);
+            }
+
+            function isHeredocRedirectOperator(op: string): boolean {
+              return /^(?:\d+)?<<-?$/.test(op);
+            }
+
+            function isWriteRedirectOperator(op: string): boolean {
+              return /^(?:\d+)?(?:>>?|<>)$/.test(op) || op === '&>' || op === '&>>';
+            }
+
+            function isReadRedirectOperator(op: string): boolean {
+              return /^(?:\d+)?<$/.test(op);
+            }
+
+            function extractRedirects(tokens: string[], cwd: string): RedirectResult {
+              const readFiles: string[] = [];
+              const writeFiles: string[] = [];
+              const toRemove = new Set<number>();
+              let unresolvedWrite = false;
+
+              const recordWriteTarget = (target: string): void => {
+                if (
+                  target === '/dev/null' ||
+                  isFdDuplicationTarget(target) ||
+                  isNetworkPseudoDevice(target)
+                ) {
+                  return;
+                }
+                if (looksLikePath(target)) {
+                  writeFiles.push(resolvePath(target, cwd));
+                } else {
+                  unresolvedWrite = true;
+                }
+              };
+
+              const recordReadTarget = (target: string): void => {
+                if (
+                  isFdDuplicationTarget(target) ||
+                  isNetworkPseudoDevice(target)
+                ) {
+                  return;
+                }
+                if (looksLikePath(target)) {
+                  readFiles.push(resolvePath(target, cwd));
+                }
+              };
+
+              for (let i = 0; i < tokens.length; i++) {
+                const tok = tokens[i]!;
+
+                if (isHeredocRedirectOperator(tok)) {
+                  toRemove.add(i);
+                  if (tokens[i + 1]) {
+                    toRemove.add(i + 1);
+                    i++;
+                  }
+                  continue;
+                }
+
+                if (isWriteRedirectOperator(tok)) {
+                  const target = tokens[i + 1];
+                  toRemove.add(i);
+                  if (target) {
+                    recordWriteTarget(target);
+                    toRemove.add(i + 1);
+                    i++;
+                  }
+                  continue;
+                }
+
+                if (isReadRedirectOperator(tok)) {
+                  const target = tokens[i + 1];
+                  toRemove.add(i);
+                  if (target) {
+                    recordReadTarget(target);
+                    toRemove.add(i + 1);
+                    i++;
+                  }
+                  continue;
+                }
+
+                const match = tok.match(
+                  /^((?:\d+)?<<-?|(?:\d+)?<>|(?:\d+)?>>|(?:\d+)?>|(?:\d+)?<|&>>|&>)(.+)$/,
+                );
+                if (!match) continue;
+
+                const op = match[1]!;
+                const target = match[2]!;
+                if (isHeredocRedirectOperator(op)) {
+                  toRemove.add(i);
+                  continue;
+                }
+                if (isWriteRedirectOperator(op)) {
+                  recordWriteTarget(target);
+                } else if (isReadRedirectOperator(op)) {
+                  recordReadTarget(target);
+                }
+                toRemove.add(i);
+              }
+
+              const filtered = tokens.filter((_, idx) => !toRemove.has(idx));
+              tokens.length = 0;
+              tokens.push(...filtered);
+
+              return { readFiles, writeFiles, unresolvedWrite };
+            }
+          ''')
+          text = text[:start] + new_redirects + text[end:]
+
+          destructure_anchor = dedent('''\
+              const { readFiles: redirectReads, writeFiles: redirectWrites } =
+                extractRedirects(tokens, cwd);
+          ''')
+          destructure_replacement = dedent('''\
+              const {
+                readFiles: redirectReads,
+                writeFiles: redirectWrites,
+                unresolvedWrite,
+              } = extractRedirects(tokens, cwd);
+              const unresolvedRedirectWrites: ShellOperation[] = unresolvedWrite
+                ? [{ virtualTool: 'write_file', pathUnresolved: true }]
+                : [];
+          ''')
+          if destructure_anchor not in text:
+              raise SystemExit('extractRedirects destructuring anchor not found')
+          text = text.replace(destructure_anchor, destructure_replacement, 1)
+
+          write_mapping = dedent('''\
+                  ...redirectWrites.map((p) => ({
+                    virtualTool: 'write_file' as const,
+                    filePath: p,
+                  })),
+          ''')
+          write_mapping_replacement = write_mapping + "      ...unresolvedRedirectWrites,\n"
+          mapping_count = text.count(write_mapping)
+          if mapping_count != 2:
+              raise SystemExit(f'expected 2 redirect write mappings, found {mapping_count}')
+          text = text.replace(write_mapping, write_mapping_replacement)
+          semantics.write_text(text)
+
+          manager = Path('packages/core/src/permissions/permission-manager.ts')
+          manager_text = manager.read_text()
+
+          priority_anchor = dedent('''\
+            const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
+              deny: 3,
+              ask: 2,
+              default: 1,
+              allow: 0,
+            };
+          ''')
+          priority_replacement = priority_anchor + dedent('''\
+
+            function shellOperationPathIsUncertain(op: ShellOperation): boolean {
+              return Boolean(
+                op.pathUnresolved || (op.cwdUnknown && op.pathMayDependOnCwd),
+              );
+            }
+          ''')
+          if priority_anchor not in manager_text:
+              raise SystemExit('decision priority anchor not found')
+          manager_text = manager_text.replace(priority_anchor, priority_replacement, 1)
+
+          uncertain_anchor = "        op.cwdUnknown &&\n        op.pathMayDependOnCwd &&\n"
+          uncertain_count = manager_text.count(uncertain_anchor)
+          if uncertain_count != 3:
+              raise SystemExit(f'expected 3 uncertain path conditions, found {uncertain_count}')
+          manager_text = manager_text.replace(
+              uncertain_anchor,
+              "        shellOperationPathIsUncertain(op) &&\n",
+          )
+          manager_text = manager_text.replace(
+              "PermissionManager: cwdUnknown escalation to 'ask' for virtualTool=${op.virtualTool} filePath=${op.filePath}",
+              "PermissionManager: uncertain-path escalation to 'ask' for virtualTool=${op.virtualTool} filePath=${op.filePath} pathUnresolved=${op.pathUnresolved} cwdUnknown=${op.cwdUnknown}",
+              1,
+          )
+          manager.write_text(manager_text)
+
+          test = Path('packages/core/src/permissions/dynamic-redirect-permissions.test.ts')
+          test.write_text(dedent('''\
+            /**
+             * @license
+             * Copyright 2026 Qwen
+             * SPDX-License-Identifier: Apache-2.0
+             */
+
+            import { describe, expect, it } from 'vitest';
+            import { PermissionManager } from './permission-manager.js';
+            import type { PermissionManagerConfig } from './permission-manager.js';
+            import { extractShellOperations } from './shell-semantics.js';
+
+            function makeConfig(options: {
+              allow?: string[];
+              ask?: string[];
+              deny?: string[];
+            }): PermissionManagerConfig {
+              return {
+                getPermissionsAllow: () => options.allow ?? [],
+                getPermissionsAsk: () => options.ask ?? [],
+                getPermissionsDeny: () => options.deny ?? [],
+                getProjectRoot: () => '/repo',
+                getCwd: () => '/repo',
+                getApprovalMode: () => 'default',
+              };
+            }
+
+            describe('unresolved shell write redirects (#10196)', () => {
+              it.each([
+                'printf PAYLOAD >"$PWD/protected.txt"',
+                'printf PAYLOAD >"${PWD}/protected.txt"',
+                'printf PAYLOAD >"$DIR/protected.txt"',
+              ])('preserves an unresolved write operation for %s', (command) => {
+                expect(extractShellOperations(command, '/repo')).toContainEqual({
+                  virtualTool: 'write_file',
+                  pathUnresolved: true,
+                });
+              });
+
+              it('preserves the concrete write behind a non-standard numeric fd', () => {
+                expect(
+                  extractShellOperations(
+                    'printf PAYLOAD 3>protected.txt >&3',
+                    '/repo',
+                  ),
+                ).toContainEqual({
+                  virtualTool: 'write_file',
+                  filePath: '/repo/protected.txt',
+                });
+              });
+
+              it('does not treat fd duplication as a filesystem write target', () => {
+                expect(
+                  extractShellOperations('printf PAYLOAD >&3', '/repo'),
+                ).not.toContainEqual({
+                  virtualTool: 'write_file',
+                  pathUnresolved: true,
+                });
+              });
+
+              it('does not let a Bash allow bypass a Write deny through a dynamic redirect', async () => {
+                const pm = new PermissionManager(
+                  makeConfig({
+                    allow: ['Bash(printf PAYLOAD)'],
+                    deny: ['WriteFileTool(protected.txt)'],
+                  }),
+                );
+                pm.initialize();
+
+                await expect(
+                  pm.evaluate({
+                    toolName: 'run_shell_command',
+                    command: 'printf PAYLOAD >"$PWD/protected.txt"',
+                    cwd: '/repo',
+                  }),
+                ).resolves.toBe('ask');
+              });
+
+              it('still denies the equivalent concrete redirect', async () => {
+                const pm = new PermissionManager(
+                  makeConfig({
+                    allow: ['Bash(printf PAYLOAD)'],
+                    deny: ['WriteFileTool(protected.txt)'],
+                  }),
+                );
+                pm.initialize();
+
+                await expect(
+                  pm.evaluate({
+                    toolName: 'run_shell_command',
+                    command: 'printf PAYLOAD >protected.txt',
+                    cwd: '/repo',
+                  }),
+                ).resolves.toBe('deny');
+              });
+
+              it('keeps an ordinary Bash allow unchanged when there is no redirect', async () => {
+                const pm = new PermissionManager(
+                  makeConfig({
+                    allow: ['Bash(printf PAYLOAD)'],
+                    deny: ['WriteFileTool(protected.txt)'],
+                  }),
+                );
+                pm.initialize();
+
+                await expect(
+                  pm.evaluate({
+                    toolName: 'run_shell_command',
+                    command: 'printf PAYLOAD',
+                    cwd: '/repo',
+                  }),
+                ).resolves.toBe('allow');
+              });
+            });
+          '''))
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Format changed files
+        run: npx prettier --write packages/core/src/permissions/shell-semantics.ts packages/core/src/permissions/permission-manager.ts packages/core/src/permissions/dynamic-redirect-permissions.test.ts
+
+      - name: Run focused tests
+        run: npx vitest run packages/core/src/permissions/dynamic-redirect-permissions.test.ts packages/core/src/permissions/permission-manager.test.ts packages/core/src/permissions/shell-semantics.test.ts
+
+      - name: Run preflight
+        run: npm run preflight
+
+      - name: Commit fix
+        shell: bash
+        run: |
+          git config user.name "SLP-DEV1"
+          git config user.email "298325363+SLP-DEV1@users.noreply.github.com"
+          git rm .github/workflows/apply-fix-10196.yml
+          git add packages/core/src/permissions/shell-semantics.ts packages/core/src/permissions/permission-manager.ts packages/core/src/permissions/dynamic-redirect-permissions.test.ts
+          git commit -m "fix(permissions): fail closed on unresolved write redirects"
+          git push origin HEAD
