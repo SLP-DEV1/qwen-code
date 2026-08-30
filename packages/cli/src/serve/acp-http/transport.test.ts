@@ -633,6 +633,8 @@ class FakeBridge {
     originatorClientId: string;
   }> = [];
   runtimeMcpRemoves: Array<{ name: string; originatorClientId: string }> = [];
+  workspaceMemoryRememberCalls: Array<Record<string, unknown>> = [];
+  workspaceMemoryForgetCalls: Array<Record<string, unknown>> = [];
   runtimeMcpAddResult: {
     shadowedSettings?: boolean;
     skipped?: boolean;
@@ -667,10 +669,16 @@ class FakeBridge {
       originatorClientId,
     };
   }
-  async runWorkspaceMemoryRemember() {
-    return { summary: 'remembered', filesTouched: [], touchedScopes: [] };
+  async runWorkspaceMemoryRemember(request: Record<string, unknown>) {
+    this.workspaceMemoryRememberCalls.push(request);
+    return {
+      summary: 'remembered',
+      filesTouched: ['/mem/project/remembered.md'],
+      touchedScopes: ['project'],
+    };
   }
-  async runWorkspaceMemoryForget() {
+  async runWorkspaceMemoryForget(request: Record<string, unknown>) {
+    this.workspaceMemoryForgetCalls.push(request);
     return {
       summary: 'forgot',
       removedEntries: [],
@@ -5629,7 +5637,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         params: {
           sessionId,
           metadata: {
-            pr: { number: 9101, url: 'https://github.com/o/r/pull/9101' },
+            pr: {
+              number: 9101,
+              url: 'https://github.com/o/r/pull/9101',
+              state: 'merged',
+            },
           },
         },
       });
@@ -5650,10 +5662,21 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           'id' in frame &&
           (frame as { id: unknown }).id === 471,
       ) as
-        | { result?: { prs?: Array<{ number: number; url: string }> } }
+        | {
+            result?: {
+              prs?: Array<{ number: number; url: string; state?: string }>;
+            };
+          }
         | undefined;
-      expect(reply?.result?.prs?.map((entry) => entry.number)).toEqual([
-        9100, 9101,
+      // The reply echoes the persisted state: the dispatch persistence arm
+      // must carry `state` into the sidecar write, not drop it.
+      expect(reply?.result?.prs).toEqual([
+        { number: 9100, url: 'https://github.com/o/r/pull/9100' },
+        {
+          number: 9101,
+          url: 'https://github.com/o/r/pull/9101',
+          state: 'merged',
+        },
       ]);
       // The entry must be re-hydrated from the sidecar BEFORE the mutation
       // so the `session_metadata_updated` event payload is complete too.
@@ -5665,6 +5688,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ).toEqual([9100]);
       const persisted = await readSessionPrs(sidecarPath);
       expect(persisted?.map((entry) => entry.number)).toEqual([9100, 9101]);
+      expect(persisted?.find((entry) => entry.number === 9101)?.state).toBe(
+        'merged',
+      );
     } finally {
       registry.dispose();
       rememberLane.dispose();
@@ -10200,7 +10226,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         };
         expect(completed.result).toMatchObject({
           status: 'completed',
-          result: { summary: 'No memory files updated.' },
+          result: { summary: 'Memory update completed.' },
         });
       } finally {
         reader.close();
@@ -10239,6 +10265,49 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           status: 'completed',
           result: { summary: 'forgot' },
         });
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/workspace/memory/forget carries a scope through, and omits it when unscoped', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 84,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'stale project note', scope: 'project' },
+        });
+        const scoped = (await reader.next()) as {
+          result: { taskId: string; status: string; scope?: string };
+        };
+        // The dispatcher's `...(rawScope ? { scope: rawScope } : {})` is the
+        // only thing carrying the caller's scope into the destructive lane;
+        // until now no test over the wire drove either direction of it.
+        expect(scoped.result.scope).toBe('project');
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'anything' },
+        });
+        const unscoped = (await reader.next()) as {
+          result: { taskId: string; status: string };
+        };
+        expect(unscoped.result).not.toHaveProperty('scope');
+
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        // A `scope: undefined` reaching the bridge reads as a requested scope
+        // to anything checking for the key, so the omitted arm is asserted
+        // strictly rather than by value.
+        expect(bridge.workspaceMemoryForgetCalls).toStrictEqual([
+          { query: 'stale project note', scope: 'project' },
+          { query: 'anything' },
+        ]);
       } finally {
         reader.close();
       }
@@ -10362,7 +10431,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(completed!.result).toMatchObject({
           taskId: restTask.taskId,
           status: 'completed',
-          result: { summary: 'No memory files updated.' },
+          result: { summary: 'Memory update completed.' },
         });
       } finally {
         reader.close();
@@ -10873,6 +10942,8 @@ describe('ACP WebSocket transport security', () => {
       cdpTunnelOverWs?: boolean;
       daemonEnv?: Readonly<NodeJS.ProcessEnv>;
       localControlToken?: string;
+      hostname?: string;
+      reportedLocalPort?: number;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -10894,6 +10965,7 @@ describe('ACP WebSocket transport security', () => {
         token: opts.token,
         credentials,
         allowedOrigins: opts.allowedOrigins,
+        hostname: opts.hostname,
         workspaceRememberLane: new WorkspaceRememberTaskLane(
           bridge as unknown as HttpAcpBridge,
         ),
@@ -10919,6 +10991,14 @@ describe('ACP WebSocket transport security', () => {
       });
       const listeningServer = app.listen(0, '127.0.0.1', () => {
         port = (listeningServer.address() as AddressInfo).port;
+        if (opts.reportedLocalPort !== undefined) {
+          listeningServer.prependListener('upgrade', (_request, socket) => {
+            Object.defineProperty(socket, 'localPort', {
+              configurable: true,
+              value: opts.reportedLocalPort,
+            });
+          });
+        }
         handle?.attachServer(listeningServer);
         acpHandle = handle;
         if (!opts.localControlToken) {
@@ -11044,6 +11124,59 @@ describe('ACP WebSocket transport security', () => {
     // The Host header will be 127.0.0.1:PORT which is in the allowlist
     expect(result.code).toBe(101);
   });
+
+  it('accepts the exact IPv4 loopback Host and Origin the daemon binds', async () => {
+    await startServer({ hostname: '127.0.0.2' });
+    const result = await wsConnectRaw('127.0.0.1', `http://127.0.0.2:${port}`, {
+      Host: `127.0.0.2:${port}`,
+    });
+    expect(result.code).toBe(101);
+  });
+
+  it.each([
+    { port: 80, authority: 'localhost', scheme: 'http', expectedCode: 101 },
+    { port: 80, authority: 'localhost', scheme: 'https', expectedCode: 403 },
+    {
+      port: 80,
+      authority: '127.0.0.2',
+      scheme: 'http',
+      expectedCode: 101,
+    },
+    {
+      port: 80,
+      authority: '127.0.0.2',
+      scheme: 'https',
+      expectedCode: 403,
+    },
+    { port: 443, authority: 'localhost', scheme: 'https', expectedCode: 101 },
+    { port: 443, authority: 'localhost', scheme: 'http', expectedCode: 403 },
+    {
+      port: 443,
+      authority: '127.0.0.2',
+      scheme: 'https',
+      expectedCode: 101,
+    },
+    {
+      port: 443,
+      authority: '127.0.0.2',
+      scheme: 'http',
+      expectedCode: 403,
+    },
+  ])(
+    'handles port-less $scheme://$authority on reported port $port with code $expectedCode',
+    async ({ port: reportedLocalPort, authority, scheme, expectedCode }) => {
+      await startServer({
+        hostname: '127.0.0.2',
+        reportedLocalPort,
+      });
+      const result = await wsConnectRaw(
+        '127.0.0.1',
+        `${scheme}://${authority}`,
+        { Host: authority },
+      );
+      expect(result.code).toBe(expectedCode);
+    },
+  );
 
   // ── CSWSH origin check ─────────────────────────────────────────────
   it('rejects WS upgrade with cross-origin Origin header', async () => {
