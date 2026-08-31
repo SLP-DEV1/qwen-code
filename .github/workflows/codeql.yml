@@ -1,43 +1,41 @@
 name: 'CodeQL'
 
+# CodeQL used to be a per-push job in ci.yml. Security findings rarely change
+# commit-to-commit and the scan is non-blocking (never a required check), so
+# running it on every merge to `main` just piled onto the scarce hosted Linux
+# pool. Run it on a nightly schedule (plus manual dispatch) instead; findings
+# still surface in the Security tab. If fresher results are wanted, add a
+# path-filtered `push` trigger for security-relevant sources.
 on:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/codeql.yml']
+  schedule:
+    - cron: '0 3 * * *' # nightly (~03:00 UTC), staggered from the E2E nightly
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  actions: 'read'
+  contents: 'read'
+  security-events: 'write'
+
+concurrency:
+  group: 'codeql'
+  cancel-in-progress: false
 
 jobs:
-  pr10212-hardening:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  codeql:
+    name: 'CodeQL'
+    runs-on: 'ubuntu-latest'
+    # Analysis normally finishes in ~7-9 min (22 min worst case observed). Cap it
+    # so a runner that drops its heartbeat mid-analysis can't hold a slot for the
+    # default 6h.
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+
+      - name: 'Initialize CodeQL'
+        uses: 'github/codeql-action/init@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/init@v3
         with:
-          fetch-depth: 0
-      - name: Patch PR branch
-        shell: bash
-        run: |
-          git show HEAD:.github/tmp/pr10212_fix.py > /tmp/pr10212_fix.py
-          git fetch origin fix/10197-env-prefix-bash-rules
-          git checkout -B fix/10197-env-prefix-bash-rules origin/fix/10197-env-prefix-bash-rules
-          python3 /tmp/pr10212_fix.py
-          git diff --check
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Focused tests and lint
-        run: |
-          npx vitest run packages/core/src/permissions/rule-parser.env-prefix.test.ts packages/core/src/permissions/permission-manager.test.ts
-          npx eslint packages/core/src/permissions/rule-parser.ts packages/core/src/permissions/permission-manager.ts packages/core/src/permissions/rule-parser.env-prefix.test.ts --max-warnings 0
-      - name: Push PR fix
-        run: |
-          git config user.name 'SLP-DEV1'
-          git config user.email '298325363+SLP-DEV1@users.noreply.github.com'
-          git add packages/core/src/permissions/rule-parser.ts packages/core/src/permissions/permission-manager.ts packages/core/src/permissions/rule-parser.env-prefix.test.ts
-          git commit -m 'fix(permissions): match env prefixes by shell word'
-          git push origin HEAD:fix/10197-env-prefix-bash-rules
+          languages: 'javascript'
+
+      - name: 'Perform CodeQL Analysis'
+        uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3
